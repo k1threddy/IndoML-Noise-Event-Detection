@@ -78,8 +78,8 @@ An intermediate evaluation using the epoch-4 checkpoint produced:
 
 | Metric | Result |
 |---|---:|
-| Event-based F1 | 0.33 |
-| Segment-based Dice (10 ms grid) | 0.68 |
+| Event-based F1 | 0.345 |
+| Segment-based Dice (10 ms grid) | 0.677 |
 
 These are preliminary, checkpoint-specific results, not a final benchmark claim. Other experiments produced different values; comparisons should always specify the checkpoint and evaluation protocol.
 
