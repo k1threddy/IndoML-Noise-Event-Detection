@@ -1,290 +1,109 @@
 # IndoML 2026: Noise Event Detection
 
-Experimental implementation and reproduction work for the IndoML 2026 Noise Event Detection task.
+## Project summary
 
-This repository contains the training, inference, preprocessing, and evaluation code for a seven-class sound-event detection (SED) system built around an ATST audio representation branch and a CNN–RNN detection network.
+This repository contains our implementation and experiments for the IndoML 2026 Noise Event Detection task. We developed a seven-class sound-event detection system using pretrained ATST audio representations together with a task-specific CNN–RNN detection network.
 
-> **Reproduction note:** This repository documents the implementation that was actually run. It is not a complete reproduction of every component in the reference paper. In particular, the Mean Teacher (EMA teacher + consistency-loss) procedure described in the paper was **not implemented** in these experiments.
+Our experiments focused on training with the **gold subset containing verified temporal event annotations**. The work explored supervised loss formulations and temporal event detection, rather than attempting to reproduce every component of the reference paper.
 
-## Contents
+## 1. Model overview
 
-- [Overview](#overview)
-- [Model and feature pipeline](#model-and-feature-pipeline)
-- [Event classes](#event-classes)
-- [Dataset and metadata](#dataset-and-metadata)
-- [Environment setup](#environment-setup)
-- [Pretrained checkpoint](#pretrained-checkpoint)
-- [Training](#training)
-- [Inference](#inference)
-- [Evaluation](#evaluation)
-- [Experimental configuration](#experimental-configuration)
-- [Results](#results)
-- [Implementation notes and limitations](#implementation-notes-and-limitations)
-- [Repository structure](#repository-structure)
+The system combines two audio feature paths:
 
-## Overview
+- **ATST representation path:** log-mel input at 16 kHz, using 64 mel bins and a 160-sample hop (10 ms).
+- **SED feature path:** log-mel features at 16 kHz, using 128 mel bins and a 256-sample hop (16 ms).
 
-The system combines pretrained audio representations with task-specific spectral features for frame-level sound-event detection.
+The features are processed by the CNN–RNN detection architecture to produce frame-level predictions for seven sound-event classes:
 
-The current published training configuration uses a **frozen ATST backbone**. The trainable detection network is optimized using a combination of:
+1. Animal
+2. Appliance / machine
+3. Baby / child
+4. Human non-speech
+5. Phone signal / alarm
+6. Singing / music
+7. Vehicle / traffic
 
-- Strong-label binary cross-entropy (BCE)
-- Class-specific Tversky loss
-- Class-agnostic Tversky loss
-- Weak-label loss
+The training pipeline uses 10-second windows with a 5-second stride. The training script aligns strong targets to a 16 ms frame duration.
 
-The training script uses 10-second audio windows with a 5-second stride, at a 16 kHz sample rate.
+## 2. Training data and supervision
 
-## Model and feature pipeline
+The experiments use the Vaani Noise Event Dataset. The repository includes the gold-window metadata (`gold_windows.jsonl`) and validation ground truth (`gt_validation.jsonl`); the audio files themselves are not included.
 
-At a high level, the implementation follows this flow:
+Our training focus was the gold-labelled subset, where event timestamps had been verified. This provided temporal supervision for frame-level detection and allowed us to study the effect of different loss formulations using trusted event boundaries.
 
-1. Load and prepare a 10-second audio window.
-2. Extract pretrained ATST features.
-3. Compute task-specific log-mel spectral features for the SED branch.
-4. Process the features through the CNN–RNN detection architecture.
-5. Produce frame-level class predictions for the seven event classes.
-6. Train against strong and weak annotations using the configured losses.
+The current training configuration uses a frozen pretrained ATST backbone. The task-specific detection layers are trained on the available labelled data.
 
-### Feature time resolutions
+## 3. Training objective
 
-The implementation uses different hops for the two feature paths:
+We experimented with a combined objective containing:
 
-| Feature path | Configuration | Frame hop |
-|---|---|---:|
-| ATST input mel | 16 kHz, 64 mel bins, 160-sample hop | 10 ms |
-| SED mel | 16 kHz, 128 mel bins, 256-sample hop | 16 ms |
+- **Strong-label BCE (weight 1.0):** frame-level supervised binary cross-entropy.
+- **Class-specific Tversky (weight 1.0):** computes a Tversky loss independently for each event class.
+- **Class-agnostic Tversky (weight 3.0):** collapses class predictions into an any-event probability and optimizes temporal event detection.
+- **Weak-label loss (weight 0.5):** uses clip-level weak-label supervision.
 
-The training script defines its strong-target frame duration as 256 / 16000 seconds (16 ms). Do not confuse this model-output frame duration with the 10 ms grid used by the event-level segment-Dice evaluation script.
+The Tversky parameters in the checked-in configuration are \(\alpha=0.6\) and \(\beta=1.5\). The training configuration uses a batch size of 16, a maximum of 20 epochs, and separate learning rates for the CNN, RNN, and other trainable parameters.
 
-The model implementation and feature alignment are in `nnet/`, `dataset.py`, and `train_gold_tversky.py`.
+### Frozen and fine-tuned ATST
 
-## Event classes
+The training script currently included in this repository is the **frozen-ATST configuration**: all parameters in the ATST branch, including transformer blocks 10 and 11, have `requires_grad=False`. The CNN–RNN detection layers remain trainable.
 
-The training code uses the following seven classes:
+We also explored unfreezing the final two ATST blocks in a late experiment. That experiment was performed close to the submission deadline and was not sufficiently investigated to treat it as a separately validated result. The checked-in training script therefore represents the frozen configuration.
 
-1. `animal`
-2. `appliance_machine`
-3. `baby_child`
-4. `human_non_speech`
-5. `phone_signal_alarm`
-6. `singing_music`
-7. `vehicle_traffic`
+## 4. Difference from the reference paper
 
-## Dataset and metadata
+The reference paper describes a semi-supervised Mean Teacher framework. In that approach, a teacher network is maintained as an exponential moving average (EMA) of the student, generates pseudo-labels for unlabelled samples, and supplies a consistency-learning signal.
 
-The experiments use the Vaani Noise Event Dataset supplied for the task.
+We did **not** implement the Mean Teacher component in this project. Our experiments were scoped around the gold-labelled subset with verified event timestamps. Since the training focus was on data with trusted temporal annotations, we prioritized supervised temporal learning and comparisons between BCE/Tversky-based objectives, rather than adding a pseudo-label and consistency-training pipeline for unlabelled data.
 
-The repository includes JSONL metadata files:
+Accordingly, this repository does not contain:
+- an EMA teacher network or EMA update;
+- teacher-generated pseudo-labels for unlabelled samples; or
+- a Mean Teacher consistency loss.
 
-- `gold_windows.jsonl`: window-level gold training metadata consumed by the training script.
-- `gt_validation.jsonl`: validation ground-truth events consumed by the evaluation script.
+This is a deliberate difference in experimental scope, not a claim that Mean Teacher is unnecessary when gold annotations are available. Semi-supervised learning could still be explored by incorporating additional unlabelled data.
 
-The audio dataset itself is not included. Configure the dataset paths for the environment where the code is run.
+## 5. Evaluation
 
-The training and validation scripts currently contain a lab-specific validation path:
+We report two distinct event-detection metrics:
 
-```text
-/mnt/Work/Datasets/indoml/Vaani-Noise-Event-Dataset/validation
-```
+- **Event-based F1:** predicted events are matched to reference events using onset and offset tolerances. The evaluation code uses a tolerance of the larger of 20% of the reference-event duration or 50 ms, followed by closest-first matching.
+- **Segment-based Dice:** events are rasterized onto a 10 ms time grid and Dice is computed per clip, then averaged.
 
-Update `VALIDATION_DIR` in the relevant scripts to point to the local validation dataset location.
+The segment-Dice evaluation uses a 10 ms grid even though the model's training/output frame duration is 16 ms. Event-based F1 and segment-based Dice measure different aspects of performance and should be reported separately.
 
-### Metadata-generation scripts
+### Preliminary result
 
-- `make_train_gt.py`: creates clip-level training ground truth from window metadata.
-- `make_gt_validation.py`: creates clip-level validation ground truth from the validation metadata JSON.
+An intermediate evaluation using the epoch-4 checkpoint produced:
 
-**Path note:** The checked-in `gold_windows.jsonl` is in the repository root, while `make_train_gt.py` currently looks for `metadata/gold_windows.jsonl`. If you use this generator, update its `INPUT_FILE` path to the root-level file (or place the input file in the expected `metadata/` directory). The training script itself reads the root-level `gold_windows.jsonl`.
-
-## Environment setup
-
-The project requires Python 3.11 or later. Dependencies are declared in `pyproject.toml` and pinned in `uv.lock`.
-
-Using uv:
-
-```bash
-uv sync
-source .venv/bin/activate
-```
-
-The training and inference scripts use PyTorch and torchaudio. A compatible PyTorch/torchaudio installation and CUDA environment are needed to use a GPU. The scripts fall back to CPU when CUDA is unavailable, although training will be substantially slower.
-
-The scripts currently set `CUDA_VISIBLE_DEVICES = "1"`. Change this to the appropriate GPU index for your machine, or remove the setting if you want to use the default device visibility.
-
-## Pretrained checkpoint
-
-The ATST pretrained checkpoint is not committed to this repository.
-
-The scripts expect it at:
-
-```text
-checkpoints/atst_as2M.ckpt
-```
-
-Obtain the checkpoint from its authorized source and place it at that location, or update `ATST_CHECKPOINT` in the training and inference scripts. Check the original checkpoint's terms before redistributing it.
-
-Training checkpoints and generated inference predictions are runtime artifacts and are intentionally excluded from Git.
-
-## Training
-
-The main training entry point is:
-
-```text
-train_gold_tversky.py
-```
-
-From the repository root, after configuring the dataset and checkpoint paths:
-
-```bash
-uv run python train_gold_tversky.py
-```
-
-The checked-in configuration includes:
-
-| Setting | Value |
-|---|---:|
-| Sample rate | 16,000 Hz |
-| Window duration | 10 s |
-| Window stride | 5 s |
-| Batch size | 16 |
-| Maximum epochs | 20 |
-| CNN learning rate | 5e-5 |
-| RNN learning rate | 3e-4 |
-| Other trainable parameters learning rate | 5e-5 |
-| Strong BCE weight | 1.0 |
-| Class-specific Tversky weight | 1.0 |
-| Class-agnostic Tversky weight | 3.0 |
-| Weak-label loss weight | 0.5 |
-| Tversky alpha | 0.6 |
-| Tversky beta | 1.5 |
-| Validation threshold | 0.50 |
-
-### Frozen ATST configuration
-
-In the checked-in training script, all parameters in `model.atst_frame` have `requires_grad = False`. The final two ATST transformer blocks (indices 10 and 11) are also explicitly left frozen.
-
-Consequently, the ATST backbone is frozen in this published configuration. The CNN/RNN and other trainable detection layers are optimized.
-
-A late fine-tuning experiment was also explored by unfreezing ATST blocks 10 and 11. That experiment is distinct from the frozen configuration documented by the current training script.
-
-## Inference
-
-The validation inference entry point is:
-
-```text
-infer_validation_16ms.py
-```
-
-Run it from the repository root after setting the checkpoint and validation dataset paths:
-
-```bash
-uv run python infer_validation_16ms.py
-```
-
-The script currently expects the selected model checkpoint at:
-
-```text
-work/kevanth/checkpoints_tversky/best_classagnostic_dice.pt
-```
-
-It writes predictions to:
-
-```text
-work/kevanth/inference/pred_validation.jsonl
-```
-
-Update these paths if your directory layout differs. The `work/` directory and model checkpoints are generated locally and are not tracked by Git.
-
-## Evaluation
-
-Run the evaluation script after generating the prediction JSONL:
-
-```bash
-uv run python evaluate_validation.py
-```
-
-The script compares predictions against `gt_validation.jsonl` and reports two different metrics:
-
-### Event-based F1
-
-Predicted events are matched to reference events using onset and offset tolerances. For each reference event, the tolerance is:
-
-```text
-max(20% of reference-event duration, 50 ms)
-```
-
-The script uses closest-first greedy matching and aggregates TP, FP, and FN across clips to calculate precision, recall, and event F1.
-
-### Segment-based Dice
-
-Events are rasterized onto a **10 ms** time grid. Dice is calculated per clip and averaged across the reference clips.
-
-Event-based F1 and segment-based Dice measure different properties and are not expected to be numerically identical.
-
-The prediction path in `evaluate_validation.py` is currently set to `work/kevanth/inference/pred_validation.jsonl`. Update `PRED_FILE` if inference writes to a different location.
-
-## Experimental configuration
-
-The current training objective combines the following terms:
-
-- **Strong BCE:** supervised frame-level binary cross-entropy on strongly labelled data.
-- **Class-specific Tversky:** computes a Tversky loss independently for each event class and averages across classes.
-- **Class-agnostic Tversky:** collapses class predictions into an any-event probability and computes a temporal Tversky loss against the any-event target.
-- **Weak-label loss:** uses clip-level weak labels.
-
-The checked-in configuration uses weights of 1.0, 1.0, 3.0, and 0.5 for these terms, respectively.
-
-### Mean Teacher status
-
-The reference methodology also describes a Mean Teacher approach with an exponential-moving-average (EMA) teacher, teacher-generated pseudo-labels for unlabelled data, and a student–teacher consistency loss.
-
-**That Mean Teacher component was not implemented in the experiments represented by this repository.** There is no EMA teacher update or Mean Teacher consistency-loss term in the checked-in training implementation. The use of a pretrained ATST backbone does not, by itself, constitute a student–teacher framework.
-
-## Results
-
-Results depend on the checkpoint, inference threshold, post-processing, and evaluation protocol. Record the checkpoint and configuration alongside any reported score.
-
-One intermediate evaluation shared during development, using an epoch-4 checkpoint, reported:
-
-| Metric | Intermediate result |
+| Metric | Result |
 |---|---:|
 | Event-based F1 | 0.33 |
 | Segment-based Dice (10 ms grid) | 0.68 |
 
-These are **preliminary, checkpoint-specific values**, not a final benchmark claim. Earlier experiments produced different results, and the values should not be compared with frame-wise validation metrics unless the evaluation protocol is the same.
+These are preliminary, checkpoint-specific results, not a final benchmark claim. Other experiments produced different values; comparisons should always specify the checkpoint and evaluation protocol.
 
-## Implementation notes and limitations
+## 6. Code and reproduction notes
 
-- The raw dataset and pretrained ATST checkpoint are not included.
-- Dataset and checkpoint paths must be configured for the target environment.
-- The checked-in training script is the frozen-ATST configuration.
-- The late ATST fine-tuning experiment is not presented as the frozen baseline.
-- Mean Teacher training was not implemented.
-- The metadata generator `make_train_gt.py` currently expects the training JSONL under `metadata/`, whereas the committed training JSONL is at the repository root; adjust the path before running that generator.
-- The scripts contain lab-specific paths and a CUDA device selection that may need changing on another machine.
+| File | Purpose |
+|---|---|
+| `train_gold_tversky.py` | Training with BCE and Tversky-based objectives |
+| `infer_validation_16ms.py` | Validation inference |
+| `evaluate_validation.py` | Event F1 and segment-Dice evaluation |
+| `dataset.py`, `encoder.py` | Dataset loading and temporal label encoding |
+| `make_train_gt.py`, `make_gt_validation.py` | Ground-truth metadata preparation |
+| `nnet/` | CNN, RNN, ATST and BEATs model components |
 
-## Repository structure
+Dependencies are specified in `pyproject.toml` and `uv.lock`. The project uses Python 3.11+ and can be set up with:
 
-```text
-.
-├── nnet/
-│   ├── atst/
-│   └── beats/
-├── dataset.py
-├── encoder.py
-├── train_gold_tversky.py
-├── infer_validation_16ms.py
-├── evaluate_validation.py
-├── make_train_gt.py
-├── make_gt_validation.py
-├── gold_windows.jsonl
-├── gt_validation.jsonl
-├── pyproject.toml
-├── uv.lock
-└── .gitignore
+```bash
+uv sync
 ```
 
-## Acknowledgements
+The pretrained ATST checkpoint and raw dataset are not included. Configure their paths in the scripts for the local environment before running training or inference. The current scripts contain lab-specific dataset/output paths and a CUDA device selection that may need to be changed on another machine.
 
-This work uses the task dataset and pretrained ATST components. Please consult the original dataset and model sources for their respective terms of use and citation requirements.
+**Metadata path note:** `gold_windows.jsonl` is committed in the repository root, while `make_train_gt.py` currently expects it under `metadata/gold_windows.jsonl`. Update the generator's input path or arrange the file accordingly before using that script.
+
+## Scope
+
+The repository documents the architecture, supervised training experiments, inference and evaluation work carried out for the task. It should be read as an implementation and experimental report focused on gold temporal annotations, not as a complete reproduction of the reference paper's semi-supervised Mean Teacher pipeline.
