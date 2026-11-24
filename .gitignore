@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.py[cod]
+checkpoints/
+work/
+inference/
+*.pt
+*.pth
+*.ckpt
+*.log
